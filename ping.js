@@ -1,18 +1,16 @@
 // ---------------------------------------------------------------
-// ping.js - Send a "ping" message to Codex to start a conversation
-// and trigger the 5h usage window
-// Uses ChatGPT backend-api with session token auth
+// ping.js - Lightweight ping to warm up Codex session
+// Hits auth + sentinel + conversations + models endpoints
+// Cannot POST conversation from datacenter IP (anti-bot blocked)
 // ---------------------------------------------------------------
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
 
 const {
   SESSION_TOKEN_0,
   SESSION_TOKEN_1,
   CODEX_API = "https://chatgpt.com/backend-api",
-  PING_MESSAGE = "ping",
   LOG_FILE = "./logs/codex-ping.log",
 } = process.env;
 
@@ -25,10 +23,6 @@ function log(msg) {
   const line = `[${ts}] ${msg}`;
   console.log(line);
   fs.appendFileSync(LOG_FILE, line + "\n");
-}
-
-function uuid() {
-  return crypto.randomUUID();
 }
 
 // -- Validate ---------------------------------------------------------
@@ -53,6 +47,8 @@ const baseHeaders = {
 async function ping() {
   // 1) Get access token from session
   log("[STEP 1] Getting access token...");
+  const start = Date.now();
+
   const sessionRes = await fetch("https://chatgpt.com/api/auth/session", {
     headers: baseHeaders,
   });
@@ -72,78 +68,52 @@ async function ping() {
   }
 
   const user = session.user?.name || session.user?.email || "unknown";
-  log(`[OK] Logged in as: ${user}`);
+  log(`[OK] Logged in as: ${user} (${Date.now() - start}ms)`);
 
-  // Auth headers with Bearer token
   const authHeaders = {
     ...baseHeaders,
     "Authorization": `Bearer ${accessToken}`,
   };
 
-  // 2) Get chat requirements (sentinel token)
-  log("[STEP 2] Getting chat requirements...");
+  // 2) Get chat requirements (warms up sentinel system)
+  log("[STEP 2] Warming up sentinel...");
   const reqRes = await fetch(`${CODEX_API}/sentinel/chat-requirements`, {
     method: "POST",
     headers: authHeaders,
     body: JSON.stringify({ conversation_mode_kind: "primary_assistant" }),
   });
 
-  let sentinelHeaders = {};
   if (reqRes.ok) {
-    const reqData = await reqRes.json();
-    if (reqData.token) {
-      sentinelHeaders["openai-sentinel-chat-requirements-token"] = reqData.token;
-      log("[OK] Got sentinel token");
-    }
+    log("[OK] Sentinel warmed up");
   } else {
-    log(`[WARN] Sentinel returned HTTP ${reqRes.status} - continuing anyway`);
+    log(`[WARN] Sentinel returned HTTP ${reqRes.status}`);
   }
 
-  // 3) Send the actual message to start a conversation
-  log(`[STEP 3] Sending message: "${PING_MESSAGE}"`);
-
-  const messageId = uuid();
-  const parentId = uuid();
-
-  const payload = {
-    action: "next",
-    messages: [
-      {
-        id: messageId,
-        author: { role: "user" },
-        content: {
-          content_type: "text",
-          parts: [PING_MESSAGE],
-        },
-      },
-    ],
-    parent_message_id: parentId,
-    model: "auto",
-    timezone_offset_min: -420, // GMT+7
-    conversation_mode: { kind: "primary_assistant" },
-    force_paragen: false,
-    force_paragen_model_slug: "",
-    force_nulligen: false,
-    force_rate_limit: false,
-  };
-
-  const convRes = await fetch(`${CODEX_API}/conversation`, {
-    method: "POST",
-    headers: { ...authHeaders, ...sentinelHeaders },
-    body: JSON.stringify(payload),
+  // 3) Touch conversations list
+  log("[STEP 3] Touching conversations...");
+  const convRes = await fetch(`${CODEX_API}/conversations?offset=0&limit=1&order=updated`, {
+    headers: authHeaders,
   });
 
   if (convRes.ok) {
-    log(`[OK] Message sent! HTTP ${convRes.status}`);
-    log("[OK] Codex conversation started - 5h window should be active now");
+    log("[OK] Conversations endpoint responded");
   } else {
-    const errText = await convRes.text().catch(() => "");
-    log(`[ERROR] Conversation request failed: HTTP ${convRes.status}`);
-    if (errText) log(`[ERROR] Response: ${errText.substring(0, 200)}`);
-    process.exit(1);
+    log(`[WARN] Conversations returned HTTP ${convRes.status}`);
   }
 
-  log("[DONE] Ping complete");
+  // 4) Warm up models endpoint
+  log("[STEP 4] Warming up models...");
+  const modelsRes = await fetch(`${CODEX_API}/models`, {
+    headers: authHeaders,
+  });
+
+  if (modelsRes.ok) {
+    log("[OK] Models endpoint warmed up");
+  } else {
+    log(`[WARN] Models returned HTTP ${modelsRes.status}`);
+  }
+
+  log(`[DONE] Ping complete - total ${Date.now() - start}ms`);
 }
 
 ping().catch((err) => {
