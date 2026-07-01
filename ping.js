@@ -77,8 +77,8 @@ async function ping() {
 
   try {
     // Go to Codex landing, then into the cloud workspace
-    log("[STEP 2] Opening chatgpt.com/codex ...");
-    await page.goto("https://chatgpt.com/codex", {
+    log("[STEP 2] Opening chatgpt.com/codex/cloud ...");
+    await page.goto("https://chatgpt.com/codex/cloud", {
       waitUntil: "networkidle",
       timeout: 60000,
     });
