@@ -72,7 +72,7 @@ async function ping() {
   try {
     // Navigate to Codex
     log("[STEP 2] Opening chatgpt.com/codex ...");
-    await page.goto("https://chatgpt.com/codex", {
+    await page.goto("https://chatgpt.com", {
       waitUntil: "networkidle",
       timeout: 60000,
     });
