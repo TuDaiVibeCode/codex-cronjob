@@ -2,8 +2,8 @@ name: Codex 5.5 Daily Ping
 
 on:
   schedule:
-    # 7:00 AM GMT+7 = 0:00 UTC
-    - cron: "0 0 * * *"
+    # 5:13 AM GMT+7 = 0:00 UTC
+    - cron: "13 22 * * *"
   workflow_dispatch:
 
 jobs:
