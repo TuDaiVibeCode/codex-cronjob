@@ -31,6 +31,12 @@ Cron job that pings ChatGPT Codex at **7:00 AM GMT+7** daily to start a conversa
    - `SESSION_TOKEN_1` = value of cookie `.1`
 4. Done - runs automatically every day at 7 AM GMT+7
 
+If GitHub blocks the workflow from editing `.github/workflows/codex-ping.yml`, add a `WORKFLOW_TOKEN` secret using a fine-grained PAT with repository contents/workflows write access.
+
+## Quota retry
+
+When Codex shows a quota/usage limit, `ping.js` looks for reset text such as `try again in 2 hours` or `resets at 4:30 PM`. In GitHub Actions it does not sleep and burn runner minutes: it saves the parsed reset time to `CODEX_RETRY_AT`, commits a temporary retry cron for that exact UTC minute, exits quickly, then removes that retry cron after a successful retry.
+
 ## Notes
 
 - Session tokens expire periodically. When ping fails, grab fresh tokens from your browser.

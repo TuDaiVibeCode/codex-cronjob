@@ -11,7 +11,12 @@ const {
   SESSION_TOKEN_1,
   PING_MESSAGE = "ping",
   LOG_FILE = "./logs/codex-ping.log",
+  WAIT_ON_QUOTA = "false",
+  QUOTA_RETRY_BUFFER_MS = "120000",
+  QUOTA_MAX_WAIT_MS = "21600000",
 } = process.env;
+
+const QUOTA_RETRY_EXIT_CODE = 75;
 
 // -- Logger -----------------------------------------------------------
 const logDir = path.dirname(LOG_FILE);
@@ -42,6 +47,96 @@ async function screenshot(page, name) {
 }
 
 // -- Main -------------------------------------------------------------
+function parseDurationMs(text) {
+  const words = text.toLowerCase().replace(/[^a-z0-9.]+/g, ' ').split(' ');
+  let total = 0;
+  for (const entry of words.entries()) {
+    const index = entry[0];
+    const value = Number(entry[1]);
+    const unit = words[index + 1] || '';
+    if (!Number.isFinite(value)) continue;
+    if (unit === 'hour' || unit === 'hours' || unit === 'hr' || unit === 'hrs' || unit === 'h') total += value * 60 * 60 * 1000;
+    if (unit === 'minute' || unit === 'minutes' || unit === 'min' || unit === 'mins' || unit === 'm') total += value * 60 * 1000;
+    if (unit === 'second' || unit === 'seconds' || unit === 'sec' || unit === 'secs' || unit === 's') total += value * 1000;
+  }
+  return total !== 0 ? total : null;
+}
+
+function parseClockReset(text, now = new Date()) {
+  const normalized = text.replace(/\s+/g, ' ');
+  const lower = normalized.toLowerCase();
+  const markers = ['resets', 'resetting', 'reset', 'try again', 'come back', 'available', 'resume'];
+  let start = -1;
+  for (const marker of markers) {
+    const found = lower.indexOf(marker);
+    if (found !== -1 && (start === -1 || Math.sign(found - start) === -1)) start = found;
+  }
+  if (start === -1) return null;
+  const slice = lower.slice(start, start + 160);
+  const dayHint = slice.includes('tomorrow') ? 'tomorrow' : slice.includes('today') ? 'today' : null;
+  const tokens = slice.replace(/[^a-z0-9:.]+/g, ' ').split(' ');
+  let hour = null;
+  let minute = 0;
+  let meridiem = null;
+  for (const entry of tokens.entries()) {
+    const index = entry[0];
+    const token = entry[1];
+    const match = token.match(/^(\d{1,2})(?::(\d{2}))?$/);
+    if (!match) continue;
+    hour = Number(match[1]);
+    minute = Number(match[2] || '0');
+    meridiem = tokens[index + 1] === 'am' || tokens[index + 1] === 'pm' ? tokens[index + 1] : null;
+    break;
+  }
+  if (!Number.isFinite(hour)) return null;
+  if (meridiem === 'pm') hour = (hour % 12) + 12;
+  if (meridiem === 'am') hour = hour % 12;
+  const resetAt = new Date(now);
+  resetAt.setHours(hour, minute, 0, 0);
+  if (dayHint === 'tomorrow' || Math.sign(resetAt.getTime() - now.getTime()) !== 1) resetAt.setDate(resetAt.getDate() + 1);
+  return resetAt;
+}
+
+function parseQuotaReset(pageText, now = new Date()) {
+  const text = (pageText || '').replace(/\s+/g, ' ').trim();
+  const lower = text.toLowerCase();
+  const quotaWords = ['quota', 'rate limit', 'usage limit', 'message limit', 'limit reached', 'too many requests', 'try again', 'come back'];
+  if (!quotaWords.some(function(word) { return lower.includes(word); })) return null;
+  const durationMs = parseDurationMs(text);
+  if (durationMs) return { resetAt: new Date(now.getTime() + durationMs), reason: 'duration ' + Math.ceil(durationMs / 60000) + ' minute(s)' };
+  const resetAt = parseClockReset(text, now);
+  if (resetAt) return { resetAt: resetAt, reason: 'clock time on page' };
+  return { resetAt: null, reason: 'quota text found but reset time was not parseable' };
+}
+
+function writeRetryAt(resetAt) {
+  if (!resetAt) return;
+  fs.writeFileSync('logs/retry-at.txt', resetAt.toISOString() + '\n');
+  log('[RETRY] Wrote logs/retry-at.txt: ' + resetAt.toISOString());
+}
+
+function throwQuotaLimited(quota) {
+  writeRetryAt(quota.resetAt);
+  const suffix = quota.resetAt ? ' resetAt=' + quota.resetAt.toISOString() : '';
+  const err = new Error('Quota limit detected (' + quota.reason + ').' + suffix);
+  err.code = 'QUOTA_LIMIT';
+  err.resetAt = quota.resetAt;
+  throw err;
+}
+
+async function detectQuotaOnPage(page, label) {
+  const pageText = await page.textContent('body').catch(function() { return ''; });
+  const quota = parseQuotaReset(pageText);
+  if (quota) {
+    log('[QUOTA] Detected quota limit at ' + label + ': ' + quota.reason);
+    await screenshot(page, 'quota-' + label);
+    throwQuotaLimited(quota);
+  }
+}
+
+async function sleep(ms) {
+  return new Promise(function(resolve) { setTimeout(resolve, ms); });
+}
 async function ping() {
   log("[STEP 1] Launching browser...");
 
@@ -115,6 +210,8 @@ async function ping() {
     const pageText = await page.textContent("body").catch(() => "");
     log(`[DEBUG] Page text (first 500 chars): ${pageText.substring(0, 500)}`);
 
+    await detectQuotaOnPage(page, 'before-send');
+
     // Try multiple strategies to find and use the input
     log("[STEP 3] Looking for task/message input...");
 
@@ -166,6 +263,7 @@ async function ping() {
 
         await page.waitForTimeout(5000);
         await screenshot(page, "05-sent");
+        await detectQuotaOnPage(page, 'after-send');
         log("[OK] Message sent! 5h window should be active");
         break;
       }
@@ -206,6 +304,7 @@ async function ping() {
               await page.keyboard.press("Enter");
               await page.waitForTimeout(5000);
               await screenshot(page, "07-sent-after-new-task");
+              await detectQuotaOnPage(page, 'after-new-task-send');
               log("[OK] Message sent via new task!");
               inputFound = true;
               break;
@@ -231,13 +330,42 @@ async function ping() {
   } catch (err) {
     log(`[ERROR] ${err.message}`);
     await screenshot(page, "error-crash");
+    throw err;
   } finally {
     await browser.close();
     log("[DONE] Browser closed");
   }
 }
 
-ping().catch((err) => {
-  log(`[FATAL] ${err.message}`);
-  process.exit(1);
+async function runWithQuotaRetry() {
+  while (true) {
+    try {
+      await ping();
+      return;
+    } catch (err) {
+      if (err.code !== 'QUOTA_LIMIT') throw err;
+      if (WAIT_ON_QUOTA !== 'true') {
+        process.exitCode = QUOTA_RETRY_EXIT_CODE;
+        throw err;
+      }
+      if (!err.resetAt) throw err;
+      const bufferMs = Number(QUOTA_RETRY_BUFFER_MS);
+      const maxWaitMs = Number(QUOTA_MAX_WAIT_MS);
+      const waitMs = err.resetAt.getTime() + bufferMs - Date.now();
+      if (!Number.isFinite(waitMs) || Math.sign(waitMs) !== 1) {
+        log('[RETRY] Reset time is due now; retrying immediately.');
+        continue;
+      }
+      if (Number.isFinite(maxWaitMs) && Math.sign(waitMs - maxWaitMs) === 1) {
+        throw new Error('Quota reset is too far away (' + Math.ceil(waitMs / 60000) + ' minutes).');
+      }
+      log('[RETRY] Waiting ' + Math.ceil(waitMs / 60000) + ' minute(s), then pinging again.');
+      await sleep(waitMs);
+    }
+  }
+}
+
+runWithQuotaRetry().catch(function(err) {
+  log('[FATAL] ' + err.message);
+  process.exit(process.exitCode || 1);
 });
