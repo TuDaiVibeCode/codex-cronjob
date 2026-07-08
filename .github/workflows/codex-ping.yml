@@ -4,6 +4,8 @@ on:
   schedule:
     # 5:13 AM GMT+7 = 22:13 UTC
     - cron: "13 22 * * *"
+    # Retry checks run cheaply and only continue when CODEX_RETRY_AT is due.
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -19,7 +21,7 @@ jobs:
       - name: Check retry window
         id: retry
         env:
-          GH_TOKEN: ${{ secrets.WORKFLOW_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SCHEDULE: ${{ github.event.schedule }}
           DAILY_CRON: "13 22 * * *"
@@ -46,12 +48,10 @@ jobs:
 
           echo "should_run=$should_run" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.retry.outputs.should_run == 'true'
-        with:
-          token: ${{ secrets.WORKFLOW_TOKEN || github.token }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         if: steps.retry.outputs.should_run == 'true'
         with:
           node-version: "22"
@@ -82,7 +82,7 @@ jobs:
       - name: Schedule retry cron
         if: steps.ping.outputs.exit_code == '75'
         env:
-          GH_TOKEN: ${{ secrets.WORKFLOW_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ ! -s logs/retry-at.txt ]; then
@@ -92,58 +92,21 @@ jobs:
 
           retry_at="$(cat logs/retry-at.txt)"
           due_at="$(node -e "const reset=new Date(process.argv[1]).getTime()+120000; const minimum=Date.now()+600000; console.log(new Date(Math.max(reset, minimum)).toISOString())" "$retry_at")"
-          retry_cron="$(node -e "const d=new Date(process.argv[1]); console.log([d.getUTCMinutes(), d.getUTCHours(), d.getUTCDate(), d.getUTCMonth()+1, '*'].join(' '))" "$due_at")"
 
           gh variable set CODEX_RETRY_AT --repo "$GITHUB_REPOSITORY" --body "$due_at"
-          export RETRY_CRON="$retry_cron"
-
-          python - <<'PY'
-          import os, re
-          from pathlib import Path
-          path = Path('.github/workflows/codex-ping.yml')
-          text = path.read_text()
-          text = re.sub(r'\n    # CODEX_RETRY_CRON_START\n    - cron: "[^"]+"\n    # CODEX_RETRY_CRON_END', '', text)
-          retry_cron = os.environ['RETRY_CRON']
-          block = f'    # CODEX_RETRY_CRON_START\n    - cron: "{retry_cron}"\n    # CODEX_RETRY_CRON_END\n'
-          anchor = '    - cron: "13 22 * * *"\n'
-          text = text.replace(anchor, anchor + block, 1)
-          path.write_text(text)
-          PY
-
-      - name: Commit retry cron
-        if: steps.ping.outputs.exit_code == '75'
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/workflows/codex-ping.yml
-          git commit -m "Schedule Codex quota retry" || exit 0
-          git push
+          echo "Retry scheduled for $due_at. The */15 cron will run it when due."
 
       - name: Clear retry cron
         if: steps.ping.outputs.exit_code == '0'
         env:
-          GH_TOKEN: ${{ secrets.WORKFLOW_TOKEN || github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           gh variable set CODEX_RETRY_AT --repo "$GITHUB_REPOSITORY" --body NONE
-          python - <<'PY'
-          import re
-          from pathlib import Path
-          path = Path('.github/workflows/codex-ping.yml')
-          text = path.read_text()
-          text = re.sub(r'\n    # CODEX_RETRY_CRON_START\n    - cron: "[^"]+"\n    # CODEX_RETRY_CRON_END', '', text)
-          path.write_text(text)
-          PY
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/workflows/codex-ping.yml
-          git commit -m "Clear Codex quota retry" || exit 0
-          git push
 
       - name: Upload screenshots
         if: always() && steps.retry.outputs.should_run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: screenshots
           path: |
