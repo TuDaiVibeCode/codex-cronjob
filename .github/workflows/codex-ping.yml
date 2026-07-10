@@ -4,13 +4,10 @@ on:
   schedule:
     # 5:13 AM GMT+7 = 22:13 UTC
     - cron: "13 22 * * *"
-    # Retry checks run cheaply and only continue when CODEX_RETRY_AT is due.
-    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
-  contents: write
-  actions: write
+  contents: read
 
 jobs:
   ping:
@@ -18,54 +15,19 @@ jobs:
     env:
       TZ: Asia/Bangkok
     steps:
-      - name: Check retry window
-        id: retry
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_SCHEDULE: ${{ github.event.schedule }}
-          DAILY_CRON: "13 22 * * *"
-        run: |
-          set -euo pipefail
-          retry_at="$(gh variable get CODEX_RETRY_AT --repo "$GITHUB_REPOSITORY" 2>/dev/null || true)"
-          should_run="false"
-
-          if [ "$EVENT_NAME" != "schedule" ]; then
-            should_run="true"
-          elif [ -n "$retry_at" ] && [ "$retry_at" != "NONE" ]; then
-            retry_ts="$(date -u -d "$retry_at" +%s 2>/dev/null || echo 0)"
-            now_ts="$(date -u +%s)"
-            if [ "$retry_ts" -gt 0 ] && [ "$now_ts" -ge "$retry_ts" ]; then
-              should_run="true"
-            else
-              echo "Retry scheduled for $retry_at; skipping this run."
-            fi
-          elif [ "$EVENT_SCHEDULE" = "$DAILY_CRON" ]; then
-            should_run="true"
-          else
-            echo "No retry is due for this scheduled run."
-          fi
-
-          echo "should_run=$should_run" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@v7
-        if: steps.retry.outputs.should_run == 'true'
 
       - uses: actions/setup-node@v6
-        if: steps.retry.outputs.should_run == 'true'
         with:
           node-version: "22"
 
       - run: npm ci
-        if: steps.retry.outputs.should_run == 'true'
 
       - name: Install Playwright Chromium
-        if: steps.retry.outputs.should_run == 'true'
         run: npx playwright install chromium --with-deps
 
       - name: Ping Codex
         id: ping
-        if: steps.retry.outputs.should_run == 'true'
         env:
           SESSION_TOKEN_0: ${{ secrets.SESSION_TOKEN_0 }}
           SESSION_TOKEN_1: ${{ secrets.SESSION_TOKEN_1 }}
@@ -79,33 +41,18 @@ jobs:
           fi
           exit "$code"
 
-      - name: Schedule retry cron
+      - name: Report quota limit
         if: steps.ping.outputs.exit_code == '75'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          if [ ! -s logs/retry-at.txt ]; then
-            echo "Quota detected, but reset time could not be parsed."
-            exit 1
+          if [ -s logs/retry-at.txt ]; then
+            echo "Codex quota reached. Reset time: $(cat logs/retry-at.txt)"
+          else
+            echo "Codex quota reached. Reset time could not be parsed."
           fi
-
-          retry_at="$(cat logs/retry-at.txt)"
-          due_at="$(node -e "const reset=new Date(process.argv[1]).getTime()+120000; const minimum=Date.now()+600000; console.log(new Date(Math.max(reset, minimum)).toISOString())" "$retry_at")"
-
-          gh variable set CODEX_RETRY_AT --repo "$GITHUB_REPOSITORY" --body "$due_at"
-          echo "Retry scheduled for $due_at. The */15 cron will run it when due."
-
-      - name: Clear retry cron
-        if: steps.ping.outputs.exit_code == '0'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh variable set CODEX_RETRY_AT --repo "$GITHUB_REPOSITORY" --body NONE
+          echo "The workflow will try again at the next daily run."
 
       - name: Upload screenshots
-        if: always() && steps.retry.outputs.should_run == 'true'
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: screenshots

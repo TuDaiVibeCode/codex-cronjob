@@ -33,7 +33,7 @@ Cron job that pings ChatGPT Codex at **7:00 AM GMT+7** daily to start a conversa
 
 ## Quota retry
 
-When Codex shows a quota/usage limit, `ping.js` looks for reset text such as `try again in 2 hours` or `resets at 4:30 PM`. In GitHub Actions it does not sleep and burn runner minutes: it saves the parsed reset time to `CODEX_RETRY_AT`, exits quickly, and the fixed 15-minute retry schedule runs the job once that time is due.
+When Codex shows a quota/usage limit, `ping.js` looks for reset text such as `try again in 2 hours` or `resets at 4:30 PM`. In GitHub Actions it exits successfully without sleeping or writing repository variables, records the parsed reset time in the uploaded logs, and tries again at the next daily run.
 
 ## Notes
 
